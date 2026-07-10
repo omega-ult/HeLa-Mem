@@ -75,11 +75,12 @@ class HebbianKnowledgeMemory:
         Add knowledge to Hebbian Graph
         """
         if not knowledge_text or knowledge_text.strip() in ["", "- None", "- None."]:
-            return
+            return None
 
         # Add to graph
         # We use 'system' role and 'fact' type to distinguish
-        self.knowledge_graph.add_memory(
+        # [LivMemory] 返回新节点 id(调用方据此落库,不能再靠位置式 str(len) 推断)
+        node_id = self.knowledge_graph.add_memory(
             content=knowledge_text,
             role="system",
             metadata={"type": "fact"}
@@ -87,6 +88,7 @@ class HebbianKnowledgeMemory:
         print("HebbianKB: Added knowledge node to graph.")
         self.knowledge_graph.save()
         self.save() # Save other data
+        return node_id
 
     def get_knowledge(self):
         # Return all nodes content as a list (for compatibility if needed)

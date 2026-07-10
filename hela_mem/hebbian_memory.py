@@ -25,7 +25,12 @@ class HebbianMemoryGraph:
         self.max_flipped = int(os.environ.get("HEBBIAN_MAX_FLIPPED", 5))  # [NEW] Standalone hebbian bonus
         
         print(f"[Hebbian] Initialized with: LR={self.learning_rate}, Decay={self.decay_rate}, Alpha={self.activation_alpha}, Threshold={self.spreading_threshold}, MaxFlipped={self.max_flipped}")
-        
+
+        # [LivMemory] 单调节点 id 计数器 + 最近添加的节点 id。替代位置式 str(len(nodes)):
+        # 删节点后 len 变小会造成 id 碰撞覆盖已有节点。load()/sync_id_state() 据持久化节点重算。
+        self._next_node_id = 0
+        self._last_node_id = None
+
         self.load()
 
     # [ORIGINAL]
@@ -71,8 +76,10 @@ class HebbianMemoryGraph:
         Improvements:
         1. Keyword Extraction: Extracts keywords from content using LLM and stores them in metadata.
         """
-        node_id = str(len(self.nodes))
-        
+        # [LivMemory] 单调 id,不用 str(len(nodes))(删节点后会碰撞覆盖)
+        node_id = str(self._next_node_id)
+        self._next_node_id += 1
+
         if embedding is None:
             embedding = get_embedding(content)
         
@@ -102,12 +109,12 @@ class HebbianMemoryGraph:
         self.nodes[node_id] = node
         
         # 2. Create Temporal Edge (Link to previous node)
-        # "Neurons that happen together, wire together"
-        if len(self.nodes) > 1:
-            prev_id = str(len(self.nodes) - 2)
-            # Initial temporal weight is moderate
-            self.add_edge(prev_id, node_id, weight=0.5, bidirectional=True)
-            
+        # [LivMemory] 用记录的 _last_node_id,并确认它还在(遗忘后可能已被删),而不是
+        # 位置式 str(len(nodes)-2)。
+        if self._last_node_id is not None and self._last_node_id in self.nodes:
+            self.add_edge(self._last_node_id, node_id, weight=0.5, bidirectional=True)
+        self._last_node_id = node_id
+
         return node_id
 
     def add_edge(self, u, v, weight=0.1, bidirectional=True):
@@ -411,7 +418,7 @@ class HebbianMemoryGraph:
         for u, v in to_remove:
             del self.edges[u][v]
     
-    def adaptive_forgetting(self, min_edge_weight=0.1, min_age_days=30, dry_run=True):
+    def adaptive_forgetting(self, min_edge_weight=0.1, min_age_days=30, dry_run=True, enabled=None):
         """
         [NEW] Hebbian-guided Adaptive Forgetting
         
@@ -431,8 +438,10 @@ class HebbianMemoryGraph:
         from datetime import datetime
         
         # Check if adaptive forgetting is enabled
-        use_adaptive_forgetting = os.environ.get("HEBBIAN_USE_ADAPTIVE_FORGETTING", "false").lower() == "true"
-        if not use_adaptive_forgetting:
+        # [LivMemory] enabled 显式参数优先(服务端控制);None 时回退 env(保持独立用法默认)
+        if enabled is None:
+            enabled = os.environ.get("HEBBIAN_USE_ADAPTIVE_FORGETTING", "false").lower() == "true"
+        if not enabled:
             return []
         
         forgetting_threshold = float(os.environ.get("HEBBIAN_FORGETTING_EDGE_THRESHOLD", str(min_edge_weight)))
@@ -510,6 +519,14 @@ class HebbianMemoryGraph:
         with open(self.file_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
+    def sync_id_state(self):
+        """[LivMemory] 从当前 self.nodes 重算单调 id 计数器与最近节点 id。
+        加载/注入节点后必须调用:新增 id 从 max(现有数值 id)+1 起,不复用删节点留下的空洞
+        (最高 id 也被删的退化情形复用是安全的——旧节点已彻底清除,无悬挂边)。"""
+        numeric = [int(k) for k in self.nodes.keys() if str(k).lstrip("-").isdigit()]
+        self._next_node_id = (max(numeric) + 1) if numeric else 0
+        self._last_node_id = str(max(numeric)) if numeric else None
+
     def load(self):
         if os.path.exists(self.file_path):
             try:
@@ -523,4 +540,6 @@ class HebbianMemoryGraph:
                             self.edges[u][v] = w
             except Exception as e:
                 print(f"Error loading memory: {e}")
+        # [LivMemory] 据持久化节点重算 id 状态
+        self.sync_id_state()
 
