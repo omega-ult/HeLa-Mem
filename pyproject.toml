@@ -11,8 +11,8 @@ requires-python = ">=3.10"
 dependencies = [
   "numpy",
   "openai",
-  "sentence-transformers",
-  "torch",
+  # 外部化 embedding 后移除 sentence-transformers/torch
+  # LivMemory 服务封装新增依赖见根 requirements.txt(fastapi/pymongo/uvicorn)
 ]
 
 [tool.setuptools]

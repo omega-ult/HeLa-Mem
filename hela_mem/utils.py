@@ -4,6 +4,7 @@ import numpy as np
 from openai import OpenAI
 import threading
 import os
+import re
 import json
 
 # Process-level model cache
@@ -72,42 +73,32 @@ def get_timestamp():
 def generate_id(prefix="id"):
     return f"{prefix}_{uuid.uuid4().hex[:8]}"
 
-def get_embedding(text, model_name="all-MiniLM-L6-v2"):
+def get_embedding(text, model_name=None):
     """
-    Thread-safe, process-safe embedding generation
+    Thread-safe embedding generation via external OpenAI-compatible API.
+    原版本地 SentenceTransformer 已弃用,改为 HTTP 调用 LM Studio / 任意 OpenAI 兼容 embeddings 端点。
+    维度由服务端模型决定(bge-m3 = 1024),需与 EMBEDDING_DIM / hebbian_memory.embedding_dim 一致。
     """
-    process_key = f"{os.getpid()}_{model_name}"
-    
-    if process_key not in _model_cache:
-        with _model_lock:
-            if process_key not in _model_cache:
-                try:
-                    from sentence_transformers import SentenceTransformer
-                    import torch
+    if model_name is None:
+        model_name = os.environ.get("EMBEDDING_MODEL", "text-embedding-bge-m3")
 
-                    # Force CPU for stability in multiprocessing
-                    os.environ['CUDA_VISIBLE_DEVICES'] = ''
-                    
-                    # Stagger model loading to prevent file system race conditions
-                    import random
-                    time.sleep(random.uniform(0.1, 5.0))
-                    
-                    print(f"Process {os.getpid()} loading model: {model_name}")
-                    model = SentenceTransformer(model_name, device='cpu')
-                    model.eval()
-                    # Warmup
-                    with torch.no_grad():
-                        _ = model.encode(['warmup'], convert_to_numpy=True, show_progress_bar=False)
-                    _model_cache[process_key] = model
-                except Exception as e:
-                    print(f"Error loading model: {e}")
-                    raise
-    
-    model = _model_cache[process_key]
-    with _model_lock:
-        embedding = model.encode([text], convert_to_numpy=True, show_progress_bar=False)[0]
-    
-    return embedding
+    client = gpt_client
+    if client is None:
+        # gpt_client 在 import 时若缺 key 会是 None;此处按需重建
+        client = _create_client()
+
+    max_retries = 3
+    last_err = None
+    for attempt in range(max_retries):
+        try:
+            resp = client.embeddings.create(model=model_name, input=text)
+            return np.array(resp.data[0].embedding, dtype=np.float32)
+        except Exception as e:
+            last_err = e
+            print(f"[get_embedding] Error (attempt {attempt+1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                time.sleep(1 * (attempt + 1))
+    raise RuntimeError(f"get_embedding failed after {max_retries} retries: {last_err}")
 
 def normalize_vector(vec):
     vec = np.array(vec, dtype=np.float32)
@@ -177,14 +168,25 @@ def llm_extract_keywords(text, client=None):
             "Keyword extraction requires LLM access. Set OPENAI_API_KEY or OPENAI_API_KEYS."
         )
         
-    prompt = "Please extract the keywords of the conversation topic from the following dialogue, separated by commas, and do not exceed three:\n" + text
+    # [LivMemory] 用小 instruct 模型(HEBBIAN_MODEL,如 qwen3.5-4b);prompt 明确禁思维链
+    prompt = (
+        "Extract at most 3 topic keywords from the following text. "
+        "Output ONLY the keywords separated by commas, no explanation, no reasoning:\n" + text
+    )
     messages = [
-        {"role": "system", "content": "You are a keyword extraction expert. Please extract the keywords of the conversation topic."},
+        {"role": "system", "content": "You are a keyword extraction expert. Output only comma-separated keywords, nothing else."},
         {"role": "user", "content": prompt}
     ]
-    # print("调用 GPT 提取关键词...")
     keywords_text = gpt_generate_answer(prompt, messages, client)
-    keywords = [w.strip() for w in keywords_text.split(",") if w.strip()]
+    # [LivMemory] 防御化解析:兼容中英文逗号/顿号;过滤模型跑偏时输出的长句/多词/带换行垃圾;最多 3 个
+    keywords = []
+    for w in re.split(r"[,，、;；\n]", keywords_text):
+        w = w.strip().strip('"\'`*。.:：-—• ')
+        if not w or len(w) > 20 or w.count(" ") > 3:
+            continue
+        keywords.append(w)
+        if len(keywords) >= 3:
+            break
     return set(keywords)
 
 

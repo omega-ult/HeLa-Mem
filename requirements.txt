@@ -1,4 +1,7 @@
+# HeLa-Mem 依赖(外部化 embedding 后瘦身:移除 sentence-transformers/torch)
 numpy
 openai
-sentence-transformers
-torch
+# 以下是 LivMemory 服务封装新增
+fastapi
+uvicorn[standard]
+pymongo

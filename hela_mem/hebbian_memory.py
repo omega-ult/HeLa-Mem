@@ -5,7 +5,7 @@ from collections import defaultdict
 from .utils import get_timestamp, get_embedding, normalize_vector, compute_time_decay, llm_extract_keywords
 
 class HebbianMemoryGraph:
-    def __init__(self, file_path, embedding_dim=384):
+    def __init__(self, file_path, embedding_dim=1024):
         self.file_path = file_path
         self.embedding_dim = embedding_dim
         
@@ -196,7 +196,7 @@ class HebbianMemoryGraph:
     #         
     #     return results
 
-    def retrieve(self, query, top_k=5, override_max_flipped=None):
+    def retrieve(self, query, top_k=5, override_max_flipped=None, reinforce=True):
         """
         [NEW] Hebbian Retrieval: Vector Similarity + Spreading Activation + Time Decay + Keyword Matching
         Improvements:
@@ -377,8 +377,12 @@ class HebbianMemoryGraph:
             print(f"  [Spreading] {spreading_flipped_count}/{max_flipped} flipped added.")
             
         # 4. Hebbian Learning
-        self.reinforce_memory_cluster(retrieved_ids)
-            
+        # [LivMemory] 召回与强化解耦:recall 时传 reinforce=False,retrieve 纯读不改边,
+        # 改由 dreaming 通过共激活日志回放强化(带新颖性加权),避免召回即强化的反馈回路
+        # 漂向吸引子态。默认 True 保持 HeLa 独立用法 / 知识库 search 的原行为不变。
+        if reinforce:
+            self.reinforce_memory_cluster(retrieved_ids)
+
         return results
 
     def reinforce_memory_cluster(self, node_ids):
